@@ -3,3 +3,4 @@ venv/
 audit_log.jsonl
 __pycache__/
 *.pyc
+audit_log.jsonl

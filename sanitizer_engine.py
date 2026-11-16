@@ -4,16 +4,17 @@ import math
 import os
 import re
 import time
-from typing import Any, Dict
+from typing import Any, Dict, List
 import httpx
 from audit_logger import log_sanitization_event
 
 
 class SemanticTagManager:
-    """Genera etiquetas numeradas consistentes dentro de una misma petición."""
+    """Genera etiquetas numeradas consistentes y guarda el mapa inverso para rehidratar."""
 
     def __init__(self):
         self.value_to_tag: Dict[str, str] = {}
+        self.tag_to_value: Dict[str, str] = {}
         self.counters: Dict[str, int] = {}
         self.type_counts: Dict[str, int] = {}
 
@@ -25,16 +26,20 @@ class SemanticTagManager:
         self.counters[entity_type] = self.counters.get(entity_type, 0) + 1
         tag = f"[{entity_type}_{self.counters[entity_type]}]"
         self.value_to_tag[normalized] = tag
+        self.tag_to_value[tag] = normalized
         self.type_counts[entity_type] = self.type_counts.get(entity_type, 0) + 1
         return tag
 
 
 class HybridSanitizer:
+    # Categorías críticas que disparan bloqueo HTTP 403 en lugar de anonimización
+    HIGH_RISK_TYPES = {"SECRET", "CREDIT_CARD"}
+
     def __init__(self):
         self.llm_url = os.getenv(
             "ANALYZER_LLM_URL", "https://api.groq.com/openai/v1/chat/completions"
         )
-        self.llm_model = os.getenv("ANALYZER_LLM_MODEL", "llama-3.1-8b-instant")
+        self.llm_model = os.getenv("ANALYZER_LLM_MODEL", "openai/gpt-oss-20b")
         self.llm_api_key = os.getenv("GROQ_API_KEY", "")
 
     @staticmethod
@@ -52,17 +57,6 @@ class HybridSanitizer:
         return checksum % 10 == 0
 
     @staticmethod
-    def _cuit_check(cuit: str) -> bool:
-        digits = [int(d) for d in re.sub(r"\D", "", cuit)]
-        if len(digits) != 11:
-            return False
-        weights = [5, 4, 3, 2, 7, 6, 5, 4, 3, 2]
-        total = sum(d * w for d, w in zip(digits[:10], weights))
-        mod = 11 - (total % 11)
-        check_digit = 0 if mod == 11 else (9 if mod == 10 else mod)
-        return digits[10] == check_digit
-
-    @staticmethod
     def _shannon_entropy(token: str) -> float:
         if not token:
             return 0.0
@@ -70,7 +64,7 @@ class HybridSanitizer:
         return -sum(p * math.log2(p) for p in probs)
 
     def _apply_regex_rules(self, text: str, tagger: SemanticTagManager) -> str:
-        # 1. API Keys y tokens de alta entropía
+        # 1. API Keys y tokens de alta entropía (CRÍTICO -> dispara bloqueo)
         text = re.sub(
             r"\b(?:sk-[a-zA-Z0-9_-]{20,}|ghp_[a-zA-Z0-9]{30,}|AKIA[0-9A-Z]{16})\b",
             lambda m: tagger.get_tag(m.group(0), "SECRET"),
@@ -85,7 +79,7 @@ class HybridSanitizer:
 
         text = re.sub(r"\b[A-Za-z0-9_\-+/=]{24,}\b", entropy_replacer, text)
 
-        # 2. Tarjetas de crédito (Luhn)
+        # 2. Tarjetas de crédito (CRÍTICO -> dispara bloqueo)
         text = re.sub(
             r"\b(?:\d[ -]*?){13,19}\b",
             lambda m: tagger.get_tag(m.group(0), "CREDIT_CARD")
@@ -96,15 +90,29 @@ class HybridSanitizer:
 
         # 3. CUIT / CUIL
         text = re.sub(
-            r"\b(?:20|23|24|27|30|33|34)-?\d{8}-?\d\b",
-            lambda m: tagger.get_tag(m.group(0), "CUIT")
-            if self._cuit_check(m.group(0))
-            else m.group(0),
+            r"\b(?:20|23|24|27|30|33|34)[-.\s]?\d{8}[-.\s]?\d\b",
+            lambda m: tagger.get_tag(m.group(0), "CUIT"),
             text,
         )
 
-        # 4. CBU (22 dígitos) y DNI
+        # 4. CBU (22 dígitos)
         text = re.sub(r"\b\d{22}\b", lambda m: tagger.get_tag(m.group(0), "CBU"), text)
+
+        # 5. Teléfonos argentinos
+        text = re.sub(
+            r"(?<!\w)(?:\+?54\s?9?\s?)?(?:11|[2368]\d{2,3})[-\s]?\d{4}[-\s]?\d{4}\b",
+            lambda m: tagger.get_tag(m.group(0), "PHONE"),
+            text,
+        )
+
+        # 6. Direcciones IP privadas / internas
+        text = re.sub(
+            r"\b(?:10\.\d{1,3}|192\.168|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3}\b",
+            lambda m: tagger.get_tag(m.group(0), "INTERNAL_IP"),
+            text,
+        )
+
+        # 7. DNI
         text = re.sub(
             r"\b\d{1,2}\.\d{3}\.\d{3}\b|(?<=\bDNI\s)\d{7,8}\b|(?<=\bDNI:\s)\d{7,8}\b",
             lambda m: tagger.get_tag(m.group(0), "ID"),
@@ -112,7 +120,7 @@ class HybridSanitizer:
             flags=re.IGNORECASE,
         )
 
-        # 5. Emails
+        # 8. Emails
         text = re.sub(
             r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b",
             lambda m: tagger.get_tag(m.group(0), "EMAIL"),
@@ -128,9 +136,10 @@ class HybridSanitizer:
 
         system_prompt = (
             "Sos un motor DLP de ciberseguridad. Extraé únicamente entidades sensibles "
-            "contextuales del texto: nombres de personas (PERSON), empresas/organizaciones (ORG) "
-            "y ubicaciones/direcciones (LOCATION). Ignorá etiquetas entre corchetes como [ID_1]. "
-            'Respondé ÚNICAMENTE con un JSON válido: {"entities": [{"text": "valor exacto", "type": "PERSON|ORG|LOCATION"}]}. '
+            "contextuales del texto: nombres de personas (PERSON), empresas/organizaciones (ORG), "
+            "ubicaciones/direcciones (LOCATION), proyectos internos (PROJECT) y montos financieros (FINANCIAL). "
+            "Ignorá etiquetas entre corchetes como [ID_1] o [CUIT_1]. "
+            'Respondé ÚNICAMENTE con un JSON válido: {"entities": [{"text": "valor exacto", "type": "PERSON|ORG|LOCATION|PROJECT|FINANCIAL"}]}. '
             'Si no hay entidades, devolvé {"entities": []}.'
         )
         try:
@@ -174,6 +183,18 @@ class HybridSanitizer:
                 step1 = self._apply_regex_rules(msg["content"], tagger)
                 msg["content"] = self._apply_llm_ner(step1, tagger)
 
+        # Evaluar política de riesgo
+        blocked_types: List[str] = [
+            t for t in tagger.type_counts if t in self.HIGH_RISK_TYPES
+        ]
+        action = "BLOCK" if blocked_types else "ALLOW"
+
         elapsed_ms = (time.perf_counter() - start_time) * 1000
-        log_sanitization_event(tagger.type_counts, elapsed_ms, request_id)
-        return sanitized
+        log_sanitization_event(tagger.type_counts, elapsed_ms, request_id, action=action)
+
+        return {
+            "action": action,
+            "blocked_types": blocked_types,
+            "sanitized_payload": sanitized,
+            "tag_to_value": tagger.tag_to_value,
+        }
