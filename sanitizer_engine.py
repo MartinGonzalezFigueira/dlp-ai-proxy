@@ -4,7 +4,7 @@ import math
 import os
 import re
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 import httpx
 from audit_logger import log_sanitization_event
 
@@ -34,6 +34,11 @@ class SemanticTagManager:
 class HybridSanitizer:
     # Categorías críticas que disparan bloqueo HTTP 403 en lugar de anonimización
     HIGH_RISK_TYPES = {"SECRET", "CREDIT_CARD"}
+
+    # Detecta en un texto ya sanitizado las etiquetas de categorías críticas, ej. [SECRET_1]
+    _PATRON_ETIQUETA_CRITICA = re.compile(
+        r"\[(" + "|".join(sorted(HIGH_RISK_TYPES)) + r")_\d+\]"
+    )
 
     def __init__(self):
         self.llm_url = os.getenv(
@@ -171,6 +176,34 @@ class HybridSanitizer:
             print(f"[WARN] Error consultando LLM analizador: {e}")
         return text
 
+    def _sanitizar_texto(self, texto: str, tagger: SemanticTagManager) -> str:
+        """Aplica las dos pasadas (Regex + LLM) a un texto plano."""
+        paso1 = self._apply_regex_rules(texto, tagger)
+        return self._apply_llm_ner(paso1, tagger)
+
+    def _sanitizar_contenido(self, contenido: Any, tagger: SemanticTagManager) -> Any:
+        """Sanitiza el contenido de un mensaje: string simple o lista de partes (formato multimodal)."""
+        if isinstance(contenido, str):
+            return self._sanitizar_texto(contenido, tagger)
+        if isinstance(contenido, list):
+            for parte in contenido:
+                if isinstance(parte, dict) and isinstance(parte.get("text"), str):
+                    parte["text"] = self._sanitizar_texto(parte["text"], tagger)
+        return contenido
+
+    @staticmethod
+    def _textos_del_contenido(contenido: Any) -> List[str]:
+        """Devuelve los textos de un contenido, sea string o lista de partes."""
+        if isinstance(contenido, str):
+            return [contenido]
+        if isinstance(contenido, list):
+            return [
+                parte["text"]
+                for parte in contenido
+                if isinstance(parte, dict) and isinstance(parte.get("text"), str)
+            ]
+        return []
+
     def sanitize_openai_payload(
         self, payload: Dict[str, Any], request_id: str
     ) -> Dict[str, Any]:
@@ -178,15 +211,23 @@ class HybridSanitizer:
         sanitized = copy.deepcopy(payload)
         tagger = SemanticTagManager()
 
+        # El cliente reenvía TODO el historial en cada request,
+        # incluidas las respuestas previas del asistente, que el proxy ya rehidrató con datos reales.
+        # Por eso se sanitizan los mensajes de todos los roles con un único etiquetador por request,
+        # así el mismo valor recibe siempre la misma etiqueta en todo el historial.
+        tipos_criticos: Set[str] = set()
         for msg in sanitized.get("messages", []):
-            if msg.get("role") == "user" and isinstance(msg.get("content"), str):
-                step1 = self._apply_regex_rules(msg["content"], tagger)
-                msg["content"] = self._apply_llm_ner(step1, tagger)
+            if "content" not in msg:
+                continue
+            msg["content"] = self._sanitizar_contenido(msg["content"], tagger)
+
+            # El bloqueo se decide solo por lo que envía el usuario.
+            if msg.get("role") == "user":
+                for texto in self._textos_del_contenido(msg["content"]):
+                    tipos_criticos.update(self._PATRON_ETIQUETA_CRITICA.findall(texto))
 
         # Evaluar política de riesgo
-        blocked_types: List[str] = [
-            t for t in tagger.type_counts if t in self.HIGH_RISK_TYPES
-        ]
+        blocked_types: List[str] = sorted(tipos_criticos)
         action = "BLOCK" if blocked_types else "ALLOW"
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
