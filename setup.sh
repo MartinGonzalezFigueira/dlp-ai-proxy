@@ -23,31 +23,71 @@ if [ "$MODO" = "--benchmark" ] && { [ ! -f benchmark.py ] || [ ! -f benchmark_da
   exit 1
 fi
 
-# Python 
+# Python
 echo "==> Verificando Python..."
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "ERROR: no se encontró python3. Instalalo (se necesita 3.10 o superior)." >&2
-  exit 1
-fi
-if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
-  echo "ERROR: se necesita Python 3.10 o superior (encontrado: $(python3 --version))." >&2
-  exit 1
-fi
+PYTHON_CMD=()
+PYTHON_DESC=""
 
-# Entorno virtual y dependencias 
+probar_python() {
+  local desc="$1"
+  shift
+  if "$@" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+    PYTHON_CMD=("$@")
+    PYTHON_DESC="$desc"
+    return 0
+  fi
+  return 1
+}
+
+buscar_python() {
+  for candidato in python3 python py; do
+    if command -v "$candidato" >/dev/null 2>&1; then
+      probar_python "$candidato" "$candidato" && return 0
+    fi
+  done
+  if command -v py >/dev/null 2>&1; then
+    probar_python "py -3" py "-3" && return 0
+  fi
+  return 1
+}
+
+if ! buscar_python; then
+  cat >&2 <<'EOF'
+ERROR: no se encontró un Python 3.10 o superior ejecutable.
+En Windows, `python3` suele ser el alias de Microsoft Store. Instalá Python
+desde https://www.python.org/downloads/ y probá con `python`, `py` o `py -3.12`.
+En Debian/Ubuntu: sudo apt install python3 python3-venv
+EOF
+  exit 1
+fi
+echo "    Usando $PYTHON_DESC ($("${PYTHON_CMD[@]}" --version 2>&1))"
+
+# Entorno virtual y dependencias
 echo "==> Preparando el entorno virtual (venv)..."
 if [ ! -d venv ]; then
-  python3 -m venv venv || {
+  "${PYTHON_CMD[@]}" -m venv venv || {
     echo "ERROR: no se pudo crear el venv. En Debian/Ubuntu: sudo apt install python3-venv" >&2
     exit 1
   }
 fi
 
-echo "==> Instalando dependencias..."
-./venv/bin/pip install --quiet --upgrade pip
-./venv/bin/pip install --quiet -r requirements.txt
+if [ -x venv/bin/python ]; then
+  VENV_PY="venv/bin/python"
+  VENV_PIP="venv/bin/pip"
+elif [ -x venv/Scripts/python.exe ]; then
+  VENV_PY="venv/Scripts/python.exe"
+  VENV_PIP="venv/Scripts/pip.exe"
+else
+  echo "ERROR: la carpeta venv existe pero no tiene un intérprete compatible con este entorno." >&2
+  echo "       Borrala y volvé a ejecutar el script: rm -rf venv" >&2
+  exit 1
+fi
 
-# Variables de entorno 
+echo "==> Instalando dependencias..."
+"$VENV_PIP" install --quiet --upgrade pip
+"$VENV_PIP" install --quiet -r requirements.txt
+
+# Variables de entorno
 if [ ! -f .env ] || grep -q "pega_aca" .env; then
   echo "==> Configurando .env..."
   clave=""
@@ -66,6 +106,12 @@ else
   echo "==> .env ya existe, no se modifica."
 fi
 
+# Normalizar CRLF de Windows para que `source .env` funcione en bash.
+if [ -f .env ] && grep -q $'\r' .env 2>/dev/null; then
+  tr -d '\r' < .env > .env.tmp
+  mv .env.tmp .env
+fi
+
 chmod +x iniciar_proxy.sh
 
 echo
@@ -73,16 +119,20 @@ echo "Setup listo."
 
 # Instrucciones si no se pidió demo ni benchmark 
 if [ -z "$MODO" ]; then
-  cat <<'EOF'
+  cat <<EOF
 
 Para probarlo, abrí 3 terminales en esta carpeta:
-  Terminal 1:  ./venv/bin/python mock_external_ai.py
+  Terminal 1:  "$VENV_PY" mock_external_ai.py
   Terminal 2:  ./iniciar_proxy.sh
-  Terminal 3:  ./venv/bin/python cliente_prueba.py && cat audit_log.jsonl
+  Terminal 3:  "$VENV_PY" cliente_prueba.py && cat audit_log.jsonl
 
 O corré todo junto:
   ./setup.sh --demo        demo rápida con el cliente de prueba
   ./setup.sh --benchmark   benchmark detallado multi-turno (sin servidores)
+
+Modo local/offline del Filtro 2 (sin APIs externas de análisis):
+  ./setup_local.sh ollama    usa Ollama + qwen2.5:0.5b
+  ./setup_local.sh presidio  usa Microsoft Presidio + spaCy
 EOF
   exit 0
 fi
@@ -118,7 +168,7 @@ levantar_servidores() {
 
   echo
   echo "==> Levantando la API externa simulada (puerto 9000)..."
-  ./venv/bin/python -u mock_external_ai.py >"$LOGS/mock.log" 2>&1 &
+  "$VENV_PY" -u mock_external_ai.py >"$LOGS/mock.log" 2>&1 &
   PID_MOCK=$!
   esperar_puerto 9000 || { echo "ERROR: el mock no arrancó." >&2; cat "$LOGS/mock.log" >&2; exit 1; }
 
@@ -133,7 +183,7 @@ if [ "$MODO" = "--demo" ]; then
   levantar_servidores
 
   echo "==> Ejecutando el cliente de prueba..."
-  ./venv/bin/python cliente_prueba.py
+  "$VENV_PY" cliente_prueba.py
 
   echo
   echo "================ Lo que recibió la IA externa (ya sanitizado) ================"
@@ -154,4 +204,4 @@ fi
 # Benchmark: corre en proceso, sin servidores.
 shift
 echo "==> Ejecutando el benchmark..."
-./venv/bin/python benchmark.py "$@"
+"$VENV_PY" benchmark.py "$@"

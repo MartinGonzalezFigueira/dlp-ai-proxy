@@ -38,13 +38,13 @@ CONVERSACIONES = [
         "titulo": "Alta de proveedor (datos personales + historial)",
         "turnos": [
             turno(
-                "Necesito un mail para Juan Pérez, de Logística del Sur S.A. (CUIT 30-71234567-8), "
+                "Necesito un mail para Juan Pérez, de Logística del Sur S.A. (CUIT 30-71234567-1), "
                 "confirmando su alta como proveedor.",
                 "positivo",
                 sensibles=[
                     ("Juan Pérez", "PERSON"),
                     ("Logística del Sur S.A.", "ORG"),
-                    ("30-71234567-8", "CUIT"),
+                    ("30-71234567-1", "CUIT"),
                 ],
             ),
             turno(
@@ -123,12 +123,12 @@ CONVERSACIONES = [
                 neutros=["CABA"],
             ),
             turno(
-                "Su email es mfgonzalez@correo.com.ar, su CUIL es 27-30123456-4 y su celular es "
+                "Su email es mfgonzalez@correo.com.ar, su CUIL es 27-30123456-8 y su celular es "
                 "+54 9 11 5555-1234.",
                 "positivo",
                 sensibles=[
                     ("mfgonzalez@correo.com.ar", "EMAIL"),
-                    ("27-30123456-4", "CUIL"),
+                    ("27-30123456-8", "CUIL"),
                     ("+54 9 11 5555-1234", "PHONE"),
                 ],
             ),
@@ -159,8 +159,8 @@ CONVERSACIONES = [
                 "borde",
                 sensibles=[("850.000", "FINANCIAL")],
                 conservar=["21%", "IVA"],
-                nota="Monto con un solo separador de miles: ninguna regex lo cubre, depende del "
-                     "analizador contextual (Filtro 2).",
+                nota="Monto con separador de miles: debe detectarlo la regla financiera "
+                     "del Filtro 1, sin depender del analizador contextual.",
             ),
             turno(
                 "Armame una tabla comparativa de ambos escenarios.",
@@ -209,8 +209,8 @@ CONVERSACIONES = [
                 "El pedido 20251117001 salió del depósito, ¿cómo consulto su estado por la API?",
                 "borde",
                 conservar=["20251117001"],
-                nota="Número de 11 dígitos que empieza con 20: la regex de CUIT no valida el dígito "
-                     "verificador y puede confundirlo con un CUIT.",
+                nota="Número de 11 dígitos que empieza con 20: debe rechazarse porque el "
+                     "dígito verificador de CUIT no es válido.",
             ),
             turno(
                 "Mi número de seguimiento del correo es 1234 5678 9012 3456, ¿qué significa "

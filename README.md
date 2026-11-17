@@ -14,8 +14,8 @@ A diferencia de un firewall tradicional que bloquea las peticiones sospechosas, 
                                     ┌─────────────┴─────────────┐
                                     ▼                           ▼
                           [Filtro 1: Local]           [Filtro 2: Contextual]
-                       (Regex, Luhn, CUIT,          (LLM Analizador vía Groq
-                        Entropía Shannon)            llama-3.1-8b-instant)
+                       (Regex, Luhn, CUIT,          (Groq / Ollama / Presidio
+                        Entropía Shannon)            según ANALYZER_BACKEND)
                                     │                           │
                                     └─────────────┬─────────────┘
                                                   ▼
@@ -29,6 +29,8 @@ A diferencia de un firewall tradicional que bloquea las peticiones sospechosas, 
                             sensibles)                   anonimizado)
 ```
 
+El **Filtro 2 es intercambiable**: además de la API remota de Groq, el proxy puede ejecutarse con **Ollama** o **Microsoft Presidio + spaCy** de forma 100% local/offline. La selección se hace con `ANALYZER_BACKEND`; la comparación y el despliegue air-gapped están en [`docs/PLAN_B_LOCAL.md`](docs/PLAN_B_LOCAL.md).
+
 ---
 
 ## Estructura y Responsabilidad de Archivos
@@ -36,12 +38,17 @@ A diferencia de un firewall tradicional que bloquea las peticiones sospechosas, 
 | Archivo | Capa | Responsabilidad |
 | :--- | :--- | :--- |
 | **`proxy_mitm.py`** | Red / Transporte | Addon de `mitmproxy` que intercepta llamadas `POST` a `/chat/completions`, deserializa el JSON, invoca al motor sanitizador y actualiza el payload recalculando cabeceras HTTP. |
-| **`sanitizer_engine.py`** | Motor DLP | Ejecuta el análisis híbrido en dos pasadas exclusivamente sobre los mensajes con `"role": "user"`:<br>• **Filtro 1 (Determinista):** Detecta DNI, CUIT/CUIL (validado con módulo 11), CBU (22 dígitos), tarjetas de crédito (validación de Luhn), emails y secretos con alta entropía de Shannon ($\ge 4.2$).<br>• **Filtro 2 (Contextual):** Consulta a `llama-3.1-8b-instant` (Groq) con salida JSON forzada para detectar personas (`PERSON`), organizaciones (`ORG`) y ubicaciones (`LOCATION`). Incluye *fallback* automático si falla la conexión. |
+| **`sanitizer_engine.py`** | Motor DLP | Ejecuta el análisis híbrido en dos pasadas sobre los mensajes del historial, con un etiquetador único por petición:<br>• **Filtro 1 (Determinista):** Detecta DNI, CUIT/CUIL (validado con módulo 11), CBU (22 dígitos), tarjetas de crédito (validación de Luhn), teléfonos, emails, IPs internas, montos financieros, proyectos, empresas y direcciones, además de secretos con alta entropía de Shannon ($\ge 4.2$).<br>• **Filtro 2 (Contextual):** Delega en el backend configurado (`groq`, `ollama`, `presidio` o `none`) la detección de personas (`PERSON`), organizaciones (`ORG`), ubicaciones (`LOCATION`), proyectos (`PROJECT`) y montos (`FINANCIAL`). Incluye *fallback* automático si el analizador falla. |
+| **`contextual_analyzers.py`** | Motor DLP / Filtro 2 | Implementa los backends intercambiables: API remota de Groq, LLM local vía Ollama, Microsoft Presidio + spaCy offline y modo solo regex. La fábrica `build_analyzer()` resuelve `ANALYZER_BACKEND` y degrada con aviso si el backend no está disponible. |
 | **`audit_logger.py`** | Auditoría / Forense | Registra cada evento en formato JSON Lines (`audit_log.jsonl`) guardando timestamp, categorías detectadas, cantidad de reemplazos y latencia en ms, **omitiendo por diseño cualquier valor sensible original**. |
 | **`mock_external_ai.py`** | Destino Externo | Servidor HTTP local (puerto `9000`) que emula la API de OpenAI (`chat.completions`) e imprime en consola el JSON limpio recibido para validar que no salen datos reales. |
 | **`cliente_prueba.py`** | Cliente Interno | Simula a un empleado enviando un prompt con datos personales, fiscales y tokens utilizando el SDK oficial de `openai` apuntando al proxy (`[http://127.0.0.1:8000/v1](http://127.0.0.1:8000/v1)`). |
 | **`iniciar_proxy.sh`** | Infraestructura | Script de arranque que activa el entorno virtual (`venv`), exporta las variables de `.env` y levanta `mitmdump` en modo reverso. |
 | **`requirements.txt`** | Dependencias | Lista de paquetes Python requeridos (`mitmproxy`, `httpx`, `openai`). |
+| **`requirements-local.txt`** | Dependencias | Extras para el Plan B offline con Microsoft Presidio + spaCy (`requirements-local.txt`). |
+| **`verificar_backends.py`** | Diagnóstico | Comprueba disponibilidad de `groq`, `ollama`, `presidio` y `none`, y ejecuta una detección de prueba sobre datos inventados. |
+| **`setup_local.sh`** | Infraestructura | Instala/verifica Ollama o Presidio + spaCy y actualiza `ANALYZER_BACKEND` en `.env` sin borrar otras variables. |
+| **`docs/PLAN_B_LOCAL.md`** | Documentación | Comparativa de backends, instalación local, despliegue air-gapped y consideraciones de seguridad. |
 | **`.env.example`** | Configuración | Plantilla de variables de entorno (copiar a `.env` antes de ejecutar). |
 
 ---
@@ -63,6 +70,18 @@ Crear el archivo `.env` local (ignorado por Git) y pegar una API Key gratuita de
 cp .env.example .env
 # Editar .env y asignar: GROQ_API_KEY="gsk_tu_clave_aqui"
 ```
+
+### 2.1 Modo local/offline (Plan B)
+Para entornos sin salida a APIs externas de análisis, el Filtro 2 puede ejecutarse con **Ollama** o **Presidio + spaCy**:
+```bash
+./setup_local.sh ollama      # descarga/verifica qwen2.5:0.5b y configura .env
+# o
+./setup_local.sh presidio    # instala Presidio + spaCy y configura .env
+
+./venv/bin/python verificar_backends.py --todos
+```
+> En Windows/Git Bash, el `venv` usa `Scripts/`: reemplazá `./venv/bin/python` por `./venv/Scripts/python.exe`.
+La guía completa (instalación, air-gapped, comparativa y consideraciones de seguridad) está en [`docs/PLAN_B_LOCAL.md`](docs/PLAN_B_LOCAL.md).
 
 ### 3. Ejecutar la demo (requiere 3 terminales)
 
@@ -87,7 +106,8 @@ cp .env.example .env
 * [x] Arquitectura modular definida (separación entre transporte HTTP, motor DLP, auditoría y destino).
 * [x] Proxy reverso operativo con `mitmproxy` (`mitmdump`).
 * [x] **Filtro 1 (Determinista):** Implementado con expresiones regulares, verificación matemática (Luhn / Módulo 11) y detección de secretos por entropía.
-* [x] **Filtro 2 (Contextual):** Implementado vía API de Groq (`llama-3.1-8b-instant`) con manejo de errores (`try/except`) para garantizar disponibilidad ante caídas de red.
+* [x] **Filtro 2 (Contextual):** Backends intercambiables con manejo de errores y *fallback* a solo regex: API de Groq (`openai/gpt-oss-20b` por defecto), LLM local vía **Ollama** (`qwen2.5:0.5b`) y **Microsoft Presidio + spaCy** (`es_core_news_sm`). Se selecciona con `ANALYZER_BACKEND`.
+* [x] **Alternativas de despliegue local/offline:** `setup_local.sh`, `requirements-local.txt`, diagnóstico (`verificar_backends.py`) y comparativa documentada en [`docs/PLAN_B_LOCAL.md`](docs/PLAN_B_LOCAL.md).
 * [x] **Coherencia referencial:** Etiquetado numerado (`[PERSON_1]`, `[ID_1]`, `[ORG_1]`) consistente dentro del mismo prompt.
 * [x] **Auditoría segura:** Logging estructurado en `audit_log.jsonl` sin almacenamiento de datos crudos.
 * [x] Entorno de pruebas local completo (`mock_external_ai.py` + `cliente_prueba.py`).
@@ -101,8 +121,9 @@ cp .env.example .env
    * Medir y documentar **Precisión**, **Recall**, **Tasa de Falsos Positivos** y **Latencia agregada (ms)** comparando tráfico directo vs. tráfico a través del proxy.
 2. **Rehidratación de Respuestas (De-sanitización):**
    * Implementar el hook `response()` en `proxy_mitm.py` para que, cuando la IA externa responda utilizando las etiquetas (`[PERSON_1]`), el proxy restituya el valor original antes de entregar la respuesta al usuario interno.
-3. **Alternativas de Despliegue (Plan B / Comparativa):**
-   * Documentar o crear rama alternativa con ejecución 100% local/offline mediante **Ollama** (`qwen2.5:0.5b`) o **Microsoft Presidio + spaCy** para entornos sin salida a APIs externas de análisis.
+3. **Alternativas de Despliegue (Plan B / Comparativa) — ✅ Implementado:**
+   * Backends `ollama` (`qwen2.5:0.5b`) y `presidio` (spaCy `es_core_news_sm`) seleccionables con `ANALYZER_BACKEND`, modo `auto` y degradación segura a solo regex.
+   * Guía de instalación, despliegue air-gapped y comparativa en [`docs/PLAN_B_LOCAL.md`](docs/PLAN_B_LOCAL.md); diagnóstico con `verificar_backends.py` y soporte de `benchmark.py --backend`.
 4. **Documentación Técnica y Defensa del TP:**
    * Elaborar el Diagrama de Flujo de Datos (DFD) formal identificando las fronteras de confianza.
    * Completar la matriz de amenazas **STRIDE** (justificando el diseño *zero-retention* del log y los riesgos residuales de fuga semántica).

@@ -1,0 +1,7 @@
+-r requirements.txt
+
+# Alternativa 100% local con Microsoft Presidio + spaCy.
+# El modelo de spaCy se instala aparte:
+#   python -m spacy download es_core_news_sm
+presidio-analyzer>=2.2
+spacy>=3.7,<4

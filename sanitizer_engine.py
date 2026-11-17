@@ -1,12 +1,12 @@
 import copy
-import json
 import math
 import os
 import re
 import time
-from typing import Any, Dict, List, Set
-import httpx
+from typing import Any, Dict, List, Optional, Set
+
 from audit_logger import log_sanitization_event
+from contextual_analyzers import ContextualAnalyzer, build_analyzer
 
 
 class SemanticTagManager:
@@ -35,17 +35,69 @@ class HybridSanitizer:
     # Categorías críticas que disparan bloqueo HTTP 403 en lugar de anonimización
     HIGH_RISK_TYPES = {"SECRET", "CREDIT_CARD"}
 
+    # Palabras genéricas que un LLM puede devolver como entidad contextual sin
+    # que sean un dato sensible real (ej. "proveedor" como PROJECT).
+    CONTEXT_STOPWORDS = {
+        "proveedor",
+        "cliente",
+        "empresa",
+        "organizacion",
+        "organización",
+        "proyecto",
+        "programa",
+        "finanzas",
+        "ventas",
+        "compras",
+        "marketing",
+        "legal",
+        "sistemas",
+        "operaciones",
+        "administracion",
+        "administración",
+        "recursos humanos",
+        "rrhh",
+        "tecnologia",
+        "tecnología",
+        "logistica",
+        "logística",
+        "necesito",
+        "texto",
+        "cargame",
+        "luhn",
+        "hola",
+        "gracias",
+        "favor",
+        "quiero",
+    }
+
     # Detecta en un texto ya sanitizado las etiquetas de categorías críticas, ej. [SECRET_1]
     _PATRON_ETIQUETA_CRITICA = re.compile(
         r"\[(" + "|".join(sorted(HIGH_RISK_TYPES)) + r")_\d+\]"
     )
 
-    def __init__(self):
-        self.llm_url = os.getenv(
-            "ANALYZER_LLM_URL", "https://api.groq.com/openai/v1/chat/completions"
+    def __init__(
+        self,
+        backend: Optional[str] = None,
+        analyzer: Optional[ContextualAnalyzer] = None,
+    ):
+        # El Filtro 2 es intercambiable: Groq (remoto), Ollama o Presidio (local).
+        self.analyzer = analyzer or build_analyzer(backend)
+
+        # Atributos de compatibilidad con benchmark.py y código previo.
+        self.llm_url = getattr(
+            self.analyzer, "url", os.getenv("ANALYZER_LLM_URL", "")
         )
-        self.llm_model = os.getenv("ANALYZER_LLM_MODEL", "openai/gpt-oss-20b")
-        self.llm_api_key = os.getenv("GROQ_API_KEY", "")
+        self.llm_model = getattr(
+            self.analyzer, "model", os.getenv("ANALYZER_LLM_MODEL", "")
+        )
+        self.llm_api_key = getattr(self.analyzer, "api_key", "")
+
+    @property
+    def backend_name(self) -> str:
+        return self.analyzer.name
+
+    def backend_label(self) -> str:
+        return self.analyzer.describe()
 
     @staticmethod
     def _luhn_check(card_number: str) -> bool:
@@ -62,11 +114,64 @@ class HybridSanitizer:
         return checksum % 10 == 0
 
     @staticmethod
+    def _cuit_valido(cuit: str) -> bool:
+        """Valida CUIT/CUIL con el dígito verificador (módulo 11)."""
+        digits = re.sub(r"\D", "", cuit)
+        if len(digits) != 11:
+            return False
+        weights = (5, 4, 3, 2, 7, 6, 5, 4, 3, 2)
+        total = sum(int(d) * w for d, w in zip(digits[:10], weights))
+        check = 11 - (total % 11)
+        if check == 11:
+            check = 0
+        elif check == 10:
+            check = 9
+        return check == int(digits[10])
+
+    @staticmethod
     def _shannon_entropy(token: str) -> float:
         if not token:
             return 0.0
         probs = [token.count(c) / len(token) for c in set(token)]
         return -sum(p * math.log2(p) for p in probs)
+
+    def _entidad_contextual_valida(self, valor: str, tipo: str) -> bool:
+        """Filtra falsos positivos típicos del analizador contextual."""
+        bajo = valor.lower()
+
+        if not re.search(r"[A-Za-z0-9ÁÉÍÓÚÑáéíóúñ]", valor):
+            return False
+
+        if tipo in {"PROJECT", "ORG", "PERSON"} and bajo in self.CONTEXT_STOPWORDS:
+            return False
+
+        if tipo in {"PERSON", "ORG"}:
+            primera = bajo.split()[0] if bajo.split() else ""
+            if primera in {"mi", "mis", "este", "esta", "estos", "estas"}:
+                return False
+
+        if tipo == "FINANCIAL":
+            # Los montos reales suelen traer moneda o separador de miles.
+            # Rechaza versiones, tiempos y puertos (2.31.0, 30000 ms, 8080).
+            tiene_moneda = re.search(r"(?i)(?:\$|USD|ARS|EUR)", valor) is not None
+            tiene_miles = re.search(r"\d{1,3}(?:[.,]\d{3})+", valor) is not None
+            if not tiene_moneda and not tiene_miles:
+                return False
+
+        if tipo == "LOCATION" and re.fullmatch(r"[\d\s.,-]+", valor):
+            return False
+
+        if tipo == "PERSON" and re.search(r"\d", valor):
+            return False
+
+        # Identificadores técnicos o palabras sueltas en minúscula: boto3,
+        # docker, up, python:3.12-slim.
+        if tipo == "ORG" and " " not in valor and (
+            valor.islower() or re.search(r"[:._]", valor)
+        ):
+            return False
+
+        return True
 
     def _apply_regex_rules(self, text: str, tagger: SemanticTagManager) -> str:
         # 1. API Keys y tokens de alta entropía (CRÍTICO -> dispara bloqueo)
@@ -84,7 +189,16 @@ class HybridSanitizer:
 
         text = re.sub(r"\b[A-Za-z0-9_\-+/=]{24,}\b", entropy_replacer, text)
 
-        # 2. Tarjetas de crédito (CRÍTICO -> dispara bloqueo)
+        # 2. Teléfonos argentinos. Se detectan antes que las tarjetas para que
+        # un teléfono que pasa Luhn por casualidad no dispare un bloqueo.
+        # Se exige un separador para no confundir números internos como 20251117001.
+        text = re.sub(
+            r"(?<!\w)(?:\+?54\s?9?\s?)?(?:11|[2368]\d{2,3})[-\s]\d{4}[-\s]\d{4}\b",
+            lambda m: tagger.get_tag(m.group(0), "PHONE"),
+            text,
+        )
+
+        # 3. Tarjetas de crédito (CRÍTICO -> dispara bloqueo)
         text = re.sub(
             r"\b(?:\d[ -]*?){13,19}\b",
             lambda m: tagger.get_tag(m.group(0), "CREDIT_CARD")
@@ -93,22 +207,17 @@ class HybridSanitizer:
             text,
         )
 
-        # 3. CUIT / CUIL
+        # 4. CUIT / CUIL con validación de dígito verificador
         text = re.sub(
             r"\b(?:20|23|24|27|30|33|34)[-.\s]?\d{8}[-.\s]?\d\b",
-            lambda m: tagger.get_tag(m.group(0), "CUIT"),
+            lambda m: tagger.get_tag(m.group(0), "CUIT")
+            if self._cuit_valido(m.group(0))
+            else m.group(0),
             text,
         )
 
-        # 4. CBU (22 dígitos)
+        # 5. CBU (22 dígitos)
         text = re.sub(r"\b\d{22}\b", lambda m: tagger.get_tag(m.group(0), "CBU"), text)
-
-        # 5. Teléfonos argentinos
-        text = re.sub(
-            r"(?<!\w)(?:\+?54\s?9?\s?)?(?:11|[2368]\d{2,3})[-\s]?\d{4}[-\s]?\d{4}\b",
-            lambda m: tagger.get_tag(m.group(0), "PHONE"),
-            text,
-        )
 
         # 6. Direcciones IP privadas / internas
         text = re.sub(
@@ -117,67 +226,94 @@ class HybridSanitizer:
             text,
         )
 
-        # 7. DNI
+        # 7. Montos financieros con símbolo de moneda (ej. $1.250.000).
+        # Se ejecuta antes de DNI para que los separadores de miles no se
+        # confundan con un documento.
         text = re.sub(
-            r"\b\d{1,2}\.\d{3}\.\d{3}\b|(?<=\bDNI\s)\d{7,8}\b|(?<=\bDNI:\s)\d{7,8}\b",
-            lambda m: tagger.get_tag(m.group(0), "ID"),
+            r"(?<!\w)(?:AR\$|US\$|\$)\s?\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})?(?!\w)",
+            lambda m: tagger.get_tag(m.group(0), "FINANCIAL"),
             text,
-            flags=re.IGNORECASE,
         )
 
-        # 8. Emails
+        # 8. DNI: 8 dígitos con puntos o número precedido por la etiqueta DNI.
+        def dni_replacer(match: re.Match) -> str:
+            numero = match.group(1)
+            return match.group(0).replace(numero, tagger.get_tag(numero, "ID"))
+
+        text = re.sub(
+            r"(?i)\bDNI\s*:?\s*(\d{1,2}\.?\d{3}\.?\d{3})\b",
+            dni_replacer,
+            text,
+        )
+        text = re.sub(
+            r"\b\d{2}\.\d{3}\.\d{3}\b",
+            lambda m: tagger.get_tag(m.group(0), "ID"),
+            text,
+        )
+
+        # 9. Emails
         text = re.sub(
             r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b",
             lambda m: tagger.get_tag(m.group(0), "EMAIL"),
             text,
         )
+
+        # 10. Entidades contextuales con formato reconocible, sin depender del LLM.
+        text = re.sub(
+            r"\b(?:Proyecto|Programa)\s+[A-ZÁÉÍÓÚÑ][\wáéíóúñ]*(?:\s+[A-ZÁÉÍÓÚÑ][\wáéíóúñ]*)*",
+            lambda m: tagger.get_tag(m.group(0), "PROJECT"),
+            text,
+        )
+        text = re.sub(
+            r"\b[A-ZÁÉÍÓÚÑ][\w&.'-]*(?:(?:\s+(?:de|del|la|las|los|el|y|e|da|do|dos|das|van|von|der|di|della))?"
+            r"\s+[A-ZÁÉÍÓÚÑ][\w&.'-]*)*\s+(?:S\.?A\.?|S\.?R\.?L\.?|SAS|S\.A\.S\.|Sociedad|Inc|Ltd|GmbH|LLC)"
+            r"(?![A-Za-z0-9_])",
+            lambda m: tagger.get_tag(m.group(0), "ORG"),
+            text,
+        )
+        text = re.sub(
+            r"\bBanco\s+[A-ZÁÉÍÓÚÑ][\wáéíóúñ]*(?:\s+[A-ZÁÉÍÓÚÑ][\wáéíóúñ]*)*",
+            lambda m: tagger.get_tag(m.group(0), "ORG"),
+            text,
+        )
+        text = re.sub(
+            r"(?i)\b(?:Av\.?|Avenida|Calle|Ruta|Pasaje|Boulevard|Bv\.?)\s+[\wáéíóúñ.]+(?:\s+\d{1,6})?",
+            lambda m: tagger.get_tag(m.group(0), "LOCATION"),
+            text,
+        )
         return text
 
     def _apply_llm_ner(self, text: str, tagger: SemanticTagManager) -> str:
-        """Envía el texto al LLM analizador (Groq) para extraer entidades en JSON."""
-        if not self.llm_api_key:
-            print("[WARN] Falta GROQ_API_KEY. Solo se aplicaron reglas Regex.")
+        """Envía el texto al backend contextual configurado y aplica sus entidades."""
+        if not self.analyzer.active:
             return text
 
-        system_prompt = (
-            "Sos un motor DLP de ciberseguridad. Extraé únicamente entidades sensibles "
-            "contextuales del texto: nombres de personas (PERSON), empresas/organizaciones (ORG), "
-            "ubicaciones/direcciones (LOCATION), proyectos internos (PROJECT) y montos financieros (FINANCIAL). "
-            "Ignorá etiquetas entre corchetes como [ID_1] o [CUIT_1]. "
-            'Respondé ÚNICAMENTE con un JSON válido: {"entities": [{"text": "valor exacto", "type": "PERSON|ORG|LOCATION|PROJECT|FINANCIAL"}]}. '
-            'Si no hay entidades, devolvé {"entities": []}.'
-        )
         try:
-            resp = httpx.post(
-                self.llm_url,
-                headers={"Authorization": f"Bearer {self.llm_api_key}"},
-                json={
-                    "model": self.llm_model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": text},
-                    ],
-                    "response_format": {"type": "json_object"},
-                    "temperature": 0.0,
-                },
-                timeout=15.0,
-                trust_env=False,
-            )
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"]
-            entities = json.loads(content).get("entities", [])
-
-            for ent in sorted(entities, key=lambda e: len(e.get("text", "")), reverse=True):
-                val = ent.get("text", "").strip()
-                etype = ent.get("type", "ENTITY").upper()
-                if val and not val.startswith("[") and val in text:
-                    text = text.replace(val, tagger.get_tag(val, etype))
+            entities = self.analyzer.analyze(text)
         except Exception as e:
-            print(f"[WARN] Error consultando LLM analizador: {e}")
+            print(f"[WARN] Error consultando analizador contextual: {e}")
+            return text
+
+        etiquetas_existentes = re.findall(r"\[[A-Z_]+_\d+\]", text)
+
+        for ent in sorted(entities, key=lambda e: len(e.get("text", "")), reverse=True):
+            val = str(ent.get("text", "")).strip()
+            etype = str(ent.get("type", "ENTITY")).upper()
+            if (
+                val
+                and not val.startswith("[")
+                and "[" not in val
+                and "]" not in val
+                and val in text
+                and not re.fullmatch(r"[A-Z]+_\d+", val)
+                and not any(val in etiqueta for etiqueta in etiquetas_existentes)
+                and self._entidad_contextual_valida(val, etype)
+            ):
+                text = text.replace(val, tagger.get_tag(val, etype))
         return text
 
     def _sanitizar_texto(self, texto: str, tagger: SemanticTagManager) -> str:
-        """Aplica las dos pasadas (Regex + LLM) a un texto plano."""
+        """Aplica las dos pasadas (Regex + backend contextual) a un texto plano."""
         paso1 = self._apply_regex_rules(texto, tagger)
         return self._apply_llm_ner(paso1, tagger)
 

@@ -1,4 +1,9 @@
+import sys
+
 from openai import OpenAI, PermissionDeniedError
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 client = OpenAI(
     base_url="http://127.0.0.1:8000/v1",
@@ -12,7 +17,7 @@ resp1 = client.chat.completions.create(
         {
             "role": "user",
             "content": (
-                "Redactá un mail para Juan Pérez (CUIT 20-30123456-7, tel 11-4567-8901, "
+                "Redactá un mail para Juan Pérez (CUIT 20-30123456-3, tel 11-4567-8901, "
                 "mail jperez@empresa.com) confirmando el acceso al servidor interno 192.168.10.45."
             ),
         }
@@ -42,7 +47,7 @@ historial = [
     {
         "role": "user",
         "content": (
-            "Mi nombre es Juan Pérez, CUIT 20-30123456-7, mail jperez@empresa.com. "
+            "Mi nombre es Juan Pérez, CUIT 20-30123456-3, mail jperez@empresa.com. "
             "Guardá estos datos para el siguiente turno."
         ),
     },

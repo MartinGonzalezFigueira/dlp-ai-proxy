@@ -1,0 +1,2 @@
+# Los scripts .sh deben conservar LF para funcionar en Git Bash/WSL.
+*.sh text eol=lf

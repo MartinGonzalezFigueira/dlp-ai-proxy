@@ -7,6 +7,7 @@ from sanitizer_engine import HybridSanitizer
 class DLPProxyAddon:
     def __init__(self):
         self.sanitizer = HybridSanitizer()
+        print(f"[DLP-INIT] Filtro 2: {self.sanitizer.backend_label()}")
 
     def request(self, flow: http.HTTPFlow) -> None:
         if flow.request.method != "POST" or not flow.request.path.endswith("/chat/completions"):

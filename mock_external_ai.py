@@ -1,6 +1,10 @@
 import json
+import sys
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
 class MockOpenAIHandler(BaseHTTPRequestHandler):

@@ -12,6 +12,8 @@ no genera archivos de resultados.
 
 Uso:
   ./venv/bin/python benchmark.py            corre el benchmark completo
+  ./venv/bin/python benchmark.py --backend ollama   usa el analizador local Ollama
+  ./venv/bin/python benchmark.py --backend presidio usa Presidio + spaCy (offline)
   ./venv/bin/python benchmark.py --color    fuerza colores aunque la salida no sea una terminal
   ./venv/bin/python benchmark.py --no-color desactiva los colores
 """
@@ -29,6 +31,11 @@ from datetime import datetime
 import audit_logger
 from benchmark_dataset import CONVERSACIONES
 from sanitizer_engine import HybridSanitizer
+
+# La consola de Windows usa cp1252 por defecto y no puede imprimir los
+# caracteres de las tablas/colores. Forzamos UTF-8 cuando sea posible.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 CARPETA = os.path.dirname(os.path.abspath(__file__))
 RUTA_LOG_AUDITORIA = os.path.join(tempfile.gettempdir(), "dlp_benchmark_audit.jsonl")
@@ -341,17 +348,42 @@ def cargar_env(ruta):
 
 
 def proteger_analizador(sanitizador, intervalo, estado):
-    """Envuelve el Filtro 2 (LLM en Groq) solo para el benchmark:
-    silencia sus avisos, espacia las llamadas para no superar el límite de uso
-    y reintenta una vez si falla. Las esperas se registran para descontarlas de la latencia."""
+    """Instrumenta el Filtro 2 para el benchmark.
+
+    - Groq: silencia avisos, espacia las llamadas para no superar el límite de
+      uso y reintenta una vez si falla.
+    - Ollama/Presidio: no hay límite remoto, así que no se espacia, pero sí se
+      cuentan los errores del analizador.
+    - none: no hay nada que instrumentar.
+
+    Las esperas se registran para descontarlas de la latencia."""
+
+    if sanitizador.backend_name == "none":
+        return
+
     original = sanitizador._apply_llm_ner
+
+    def intentar(texto, etiquetador):
+        salida = io.StringIO()
+        with contextlib.redirect_stdout(salida):
+            resultado = original(texto, etiquetador)
+        return resultado, salida.getvalue()
+
+    es_groq = sanitizador.backend_name == "groq" and bool(sanitizador.llm_api_key)
+
+    if not es_groq:
+        def envuelto_local(texto, etiquetador):
+            resultado, log = intentar(texto, etiquetador)
+            if "Error consultando" in log:
+                estado["fallos_analizador"] += 1
+            return resultado
+
+        sanitizador._apply_llm_ner = envuelto_local
+        return
+
     ultima = {"inicio": 0.0}
 
-    def envuelto(texto, etiquetador):
-        if not sanitizador.llm_api_key:
-            with contextlib.redirect_stdout(io.StringIO()):
-                return original(texto, etiquetador)
-
+    def envuelto_groq(texto, etiquetador):
         resultado = texto
         for intento in (1, 2):
             falta = intervalo - (time.perf_counter() - ultima["inicio"])
@@ -360,10 +392,8 @@ def proteger_analizador(sanitizador, intervalo, estado):
                 estado["espera_s"] += falta
             ultima["inicio"] = time.perf_counter()
 
-            salida = io.StringIO()
-            with contextlib.redirect_stdout(salida):
-                resultado = original(texto, etiquetador)
-            if "Error consultando" not in salida.getvalue():
+            resultado, log = intentar(texto, etiquetador)
+            if "Error consultando" not in log:
                 return resultado
 
             if intento == 1:
@@ -373,7 +403,7 @@ def proteger_analizador(sanitizador, intervalo, estado):
         estado["fallos_analizador"] += 1
         return resultado
 
-    sanitizador._apply_llm_ner = envuelto
+    sanitizador._apply_llm_ner = envuelto_groq
 
 
 # Simulación de conversaciones
@@ -688,8 +718,9 @@ def armar_informe(config, a, auditoria):
         causa = f" — posible causa: {f['nota']}" if f["nota"] else ""
         L.append(f"- **{f['turno']}** ({f['categoria']}) · {f['tipo']} · {f['detalle']}{causa}")
 
-    L += ["", "> El dataset es chico y sus datos son inventados. Con el Filtro 2 activo los resultados "
-              "pueden variar entre corridas, porque el analizador es un LLM."]
+    L += ["", "> El dataset es chico y sus datos son inventados. Con un backend LLM "
+              "(Groq/Ollama) los resultados pueden variar entre corridas; Presidio y "
+              "las reglas del Filtro 1 son deterministas."]
     return L
 
 
@@ -698,7 +729,13 @@ def armar_informe(config, a, auditoria):
 def main():
     parser = argparse.ArgumentParser(description="Benchmark del proxy DLP")
     parser.add_argument("--intervalo-ia", type=float, default=2.0,
-                        help="segundos mínimos entre llamadas al analizador (default: 2.0)")
+                        help="segundos mínimos entre llamadas al analizador Groq (default: 2.0)")
+    parser.add_argument(
+        "--backend",
+        choices=["groq", "ollama", "presidio", "auto", "none"],
+        default=None,
+        help="Backend del Filtro 2 (default: ANALYZER_BACKEND del .env o groq)",
+    )
     parser.add_argument("--no-color", action="store_true", help="desactiva los colores")
     parser.add_argument("--color", action="store_true",
                         help="fuerza colores aunque la salida no sea una terminal")
@@ -718,10 +755,10 @@ def main():
     if os.path.exists(RUTA_LOG_AUDITORIA):
         os.remove(RUTA_LOG_AUDITORIA)
 
-    sanitizador = HybridSanitizer()
+    sanitizador = HybridSanitizer(backend=args.backend)
     estado = {"espera_s": 0.0, "reintentos": 0, "fallos_analizador": 0}
     proteger_analizador(sanitizador, args.intervalo_ia, estado)
-    ia_activa = bool(sanitizador.llm_api_key)
+    ia_activa = sanitizador.analyzer.active
 
     conteo = {}
     for c in CONVERSACIONES:
@@ -732,14 +769,16 @@ def main():
         "conversaciones": len(CONVERSACIONES),
         "prompts": sum(conteo.values()),
         "distribucion": ", ".join(f"{conteo.get(cat, 0)} {cat}" for cat in CATEGORIAS),
-        "filtro2": f"activo (modelo {sanitizador.llm_model})" if ia_activa
+        "filtro2": f"activo · {sanitizador.backend_label()}" if ia_activa
         else "inactivo (solo reglas del Filtro 1; los nombres, organizaciones y direcciones no se detectan)",
     }
 
     banner(config)
-    if ia_activa:
+    if sanitizador.backend_name == "groq" and ia_activa:
         print(amarillo("  [AVISO] Las llamadas a Groq se espacian para respetar su límite de uso: "
                        "la corrida puede tardar unos minutos."))
+    elif sanitizador.backend_name in ("ollama", "presidio") and ia_activa:
+        print(verde(f"  [MODO LOCAL] Filtro 2 offline: {sanitizador.backend_label()}"))
     print(tenue("  Cada turno muestra el detalle de lo que recibe la IA externa."))
 
     seccion("SIMULACIÓN DE CONVERSACIONES", cian)
