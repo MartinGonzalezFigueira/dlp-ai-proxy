@@ -5,8 +5,7 @@
 #   ./setup.sh --demo             -> lo anterior + levanta mock y proxy y corre el cliente de prueba
 #   ./setup.sh --benchmark [...]  -> lo anterior + corre el benchmark en proceso (sin servidores)
 #                                    las opciones extra se pasan a benchmark.py
-#                                    (ej: --comparar-original --sin-ia --detalle)
-#   ./setup.sh --benchmark --e2e  -> además levanta mock y proxy y mide latencia real
+#                                    (ej: --color o --no-color)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -82,14 +81,13 @@ Para probarlo, abrí 3 terminales en esta carpeta:
   Terminal 3:  ./venv/bin/python cliente_prueba.py && cat audit_log.jsonl
 
 O corré todo junto:
-  ./setup.sh --demo              demo rápida con el cliente de prueba
-  ./setup.sh --benchmark         benchmark en proceso (40 prompts multi-turno, sin servidores)
-  ./setup.sh --benchmark --e2e   benchmark + latencia real (levanta mock y proxy)
+  ./setup.sh --demo        demo rápida con el cliente de prueba
+  ./setup.sh --benchmark   benchmark detallado multi-turno (sin servidores)
 EOF
   exit 0
 fi
 
-# Servidores (solo para --demo y para --benchmark --e2e)
+# Servidores (solo para --demo)
 LOGS=""
 PID_MOCK=""
 PID_PROXY=""
@@ -153,21 +151,7 @@ if [ "$MODO" = "--demo" ]; then
   exit 0
 fi
 
-# Benchmark: por defecto corre en proceso, sin servidores.
-# Si se pide --e2e, levanta el mock y el proxy para medir latencia real.
+# Benchmark: corre en proceso, sin servidores.
 shift
-NECESITA_SERVIDORES=0
-for arg in "$@"; do
-  if [ "$arg" = "--e2e" ]; then
-    NECESITA_SERVIDORES=1
-  fi
-done
-
-if [ "$NECESITA_SERVIDORES" -eq 1 ]; then
-  levantar_servidores
-else
-  echo "==> Benchmark en proceso (sin servidores). Agregá --e2e para medir latencia real."
-fi
-
 echo "==> Ejecutando el benchmark..."
 ./venv/bin/python benchmark.py "$@"

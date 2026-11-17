@@ -227,23 +227,102 @@ def imprimir_fallos(a, limite=12):
         print(tenue(f"  … y {len(a['fallos']) - limite} más en el informe completo."))
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _visible(texto):
+    """Largo real de un texto, sin contar los códigos de color."""
+    return len(_ANSI.sub("", texto))
+
+
+def _celdas(fila):
+    return [c.strip() for c in fila.strip().strip("|").split("|")]
+
+
+def imprimir_tabla(filas):
+    """Alinea una tabla Markdown en columnas para que se lea en la terminal."""
+    matriz = [_celdas(f) for f in filas]
+    columnas = max(len(f) for f in matriz)
+
+    separador = next(
+        (f for f in matriz if f and all(set(c) and set(c) <= set(":-") for c in f)),
+        None,
+    )
+
+    alineaciones = []
+    for i in range(columnas):
+        marca = separador[i] if separador and i < len(separador) else ":---"
+        if marca.startswith(":") and marca.endswith(":"):
+            alineaciones.append("centro")
+        elif marca.endswith(":"):
+            alineaciones.append("derecha")
+        else:
+            alineaciones.append("izquierda")
+
+    anchos = [0] * columnas
+    for f in matriz:
+        if f is separador:
+            continue
+        for i, c in enumerate(f[:columnas]):
+            anchos[i] = max(anchos[i], _visible(c))
+
+    def rellenar(celda, ancho, alineacion):
+        hueco = max(0, ancho - _visible(celda))
+        if alineacion == "derecha":
+            return " " * hueco + celda
+        if alineacion == "centro":
+            izquierda = hueco // 2
+            return " " * izquierda + celda + " " * (hueco - izquierda)
+        return celda + " " * hueco
+
+    for indice, fila in enumerate(matriz):
+        if fila is separador:
+            reglas = []
+            for i in range(columnas):
+                ancho = max(2, anchos[i])
+                if alineaciones[i] == "derecha":
+                    reglas.append("-" * (ancho - 1) + ":")
+                elif alineaciones[i] == "centro":
+                    reglas.append(":" + "-" * max(0, ancho - 2) + ":")
+                else:
+                    reglas.append(":" + "-" * (ancho - 1))
+            yield tenue("| " + " | ".join(reglas) + " |")
+            continue
+
+        celdas = [rellenar(c, anchos[i], alineaciones[i])
+                  for i, c in enumerate(fila[:columnas])]
+        if indice == 0:
+            celdas = [negrita(c) for c in celdas]
+        yield "| " + " | ".join(celdas) + " |"
+
+
 def imprimir_informe(lineas):
-    """Colorea el Markdown para que se lea cómodo en la terminal."""
+    """Colorea el Markdown y alinea las tablas para que se lea en la terminal."""
+    tabla = []
+
+    def volcar():
+        if tabla:
+            for fila in imprimir_tabla(tabla):
+                print(fila)
+            tabla.clear()
+
     for texto in lineas:
+        if texto.startswith("|"):
+            tabla.append(texto)
+            continue
+        volcar()
         if texto.startswith("# "):
             print("\n" + cian(negrita(texto)))
         elif texto.startswith("## "):
             print("\n" + magenta(negrita(texto)))
-        elif texto.startswith("| :---"):
-            print(tenue(texto))
-        elif texto.startswith("|"):
-            print(texto)
         elif texto.startswith("- **"):
             print(rojo(texto))
         elif texto.startswith(">"):
             print(tenue(texto))
         else:
             print(texto)
+
+    volcar()
 
 
 # Preparación
