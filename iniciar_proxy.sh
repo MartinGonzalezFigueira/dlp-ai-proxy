@@ -1,13 +1,10 @@
 #!/bin/bash
 cd "$(dirname "$0")"
 
-# Activar el venv en Linux/macOS (bin/) o Windows/Git Bash (Scripts/).
 if [ -f venv/bin/activate ]; then
-  # shellcheck disable=SC1091
   source venv/bin/activate
   VENV_PY="venv/bin/python"
 elif [ -f venv/Scripts/activate ]; then
-  # shellcheck disable=SC1091
   source venv/Scripts/activate
   VENV_PY="venv/Scripts/python.exe"
 else
@@ -15,22 +12,18 @@ else
   exit 1
 fi
 
-# Normalizar .env si viene con CRLF de Windows.
 if [ -f .env ] && grep -q $'\r' .env 2>/dev/null; then
   tr -d '\r' < .env > .env.tmp
   mv .env.tmp .env
 fi
 
 set -a
-# shellcheck disable=SC1091
 source .env
 set +a
 
-# Destino del proxy. Por defecto, el mock local de la demo.
 TARGET_URL="${DLP_TARGET_URL:-http://127.0.0.1:9000}"
 echo "[DLP-INIT] Destino externo: $TARGET_URL"
 
-# Aviso temprano si el destino local no está levantado.
 case "$TARGET_URL" in
   http://127.0.0.1:*|http://localhost:*)
     TARGET_PORT="${TARGET_URL##*:}"

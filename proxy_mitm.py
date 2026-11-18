@@ -21,7 +21,6 @@ class DLPProxyAddon:
         request_id = str(uuid.uuid4())[:8]
         result = self.sanitizer.sanitize_openai_payload(payload, request_id)
 
-        # 1. Política de bloqueo para datos críticos (SECRET / CREDIT_CARD)
         if result["action"] == "BLOCK":
             motivos = ", ".join(result["blocked_types"])
             print(f"[DLP-BLOCK] Petición {request_id} bloqueada por contener: {motivos}")
@@ -39,11 +38,9 @@ class DLPProxyAddon:
             )
             return
 
-        # 2. Guardar mapa inverso en el flujo para rehidratar cuando vuelva la respuesta
         flow.metadata["dlp_tag_map"] = result["tag_to_value"]
         flow.metadata["dlp_request_id"] = request_id
 
-        # 3. Reemplazar el body saliente con el texto sanitizado
         flow.request.text = json.dumps(result["sanitized_payload"], ensure_ascii=False)
         print(f"[DLP-ALLOW] Petición {request_id} sanitizada y reenviada.")
 
@@ -57,7 +54,6 @@ class DLPProxyAddon:
         except json.JSONDecodeError:
             return
 
-        # Ordenar etiquetas por longitud descendente ([ID_10] antes que [ID_1])
         sorted_tags = sorted(tag_map.items(), key=lambda item: len(item[0]), reverse=True)
 
         modified = False

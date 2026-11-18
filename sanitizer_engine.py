@@ -32,11 +32,9 @@ class SemanticTagManager:
 
 
 class HybridSanitizer:
-    # Categorías críticas que disparan bloqueo HTTP 403 en lugar de anonimización
     HIGH_RISK_TYPES = {"SECRET", "CREDIT_CARD"}
 
-    # Palabras genéricas que un LLM puede devolver como entidad contextual sin
-    # que sean un dato sensible real (ej. "proveedor" como PROJECT).
+
     CONTEXT_STOPWORDS = {
         "proveedor",
         "cliente",
@@ -70,7 +68,6 @@ class HybridSanitizer:
         "quiero",
     }
 
-    # Detecta en un texto ya sanitizado las etiquetas de categorías críticas, ej. [SECRET_1]
     _PATRON_ETIQUETA_CRITICA = re.compile(
         r"\[(" + "|".join(sorted(HIGH_RISK_TYPES)) + r")_\d+\]"
     )
@@ -80,10 +77,8 @@ class HybridSanitizer:
         backend: Optional[str] = None,
         analyzer: Optional[ContextualAnalyzer] = None,
     ):
-        # El Filtro 2 es intercambiable: Groq (remoto), Ollama o Presidio (local).
         self.analyzer = analyzer or build_analyzer(backend)
 
-        # Atributos de compatibilidad con benchmark.py y código previo.
         self.llm_url = getattr(
             self.analyzer, "url", os.getenv("ANALYZER_LLM_URL", "")
         )
@@ -151,8 +146,7 @@ class HybridSanitizer:
                 return False
 
         if tipo == "FINANCIAL":
-            # Los montos reales suelen traer moneda o separador de miles.
-            # Rechaza versiones, tiempos y puertos (2.31.0, 30000 ms, 8080).
+
             tiene_moneda = re.search(r"(?i)(?:\$|USD|ARS|EUR)", valor) is not None
             tiene_miles = re.search(r"\d{1,3}(?:[.,]\d{3})+", valor) is not None
             if not tiene_moneda and not tiene_miles:
@@ -164,8 +158,7 @@ class HybridSanitizer:
         if tipo == "PERSON" and re.search(r"\d", valor):
             return False
 
-        # Identificadores técnicos o palabras sueltas en minúscula: boto3,
-        # docker, up, python:3.12-slim.
+
         if tipo == "ORG" and " " not in valor and (
             valor.islower() or re.search(r"[:._]", valor)
         ):
@@ -174,7 +167,6 @@ class HybridSanitizer:
         return True
 
     def _apply_regex_rules(self, text: str, tagger: SemanticTagManager) -> str:
-        # 1. API Keys y tokens de alta entropía (CRÍTICO -> dispara bloqueo)
         text = re.sub(
             r"\b(?:sk-[a-zA-Z0-9_-]{20,}|ghp_[a-zA-Z0-9]{30,}|AKIA[0-9A-Z]{16})\b",
             lambda m: tagger.get_tag(m.group(0), "SECRET"),
@@ -189,16 +181,12 @@ class HybridSanitizer:
 
         text = re.sub(r"\b[A-Za-z0-9_\-+/=]{24,}\b", entropy_replacer, text)
 
-        # 2. Teléfonos argentinos. Se detectan antes que las tarjetas para que
-        # un teléfono que pasa Luhn por casualidad no dispare un bloqueo.
-        # Se exige un separador para no confundir números internos como 20251117001.
         text = re.sub(
             r"(?<!\w)(?:\+?54\s?9?\s?)?(?:11|[2368]\d{2,3})[-\s]\d{4}[-\s]\d{4}\b",
             lambda m: tagger.get_tag(m.group(0), "PHONE"),
             text,
         )
 
-        # 3. Tarjetas de crédito (CRÍTICO -> dispara bloqueo)
         text = re.sub(
             r"\b(?:\d[ -]*?){13,19}\b",
             lambda m: tagger.get_tag(m.group(0), "CREDIT_CARD")
@@ -207,7 +195,6 @@ class HybridSanitizer:
             text,
         )
 
-        # 4. CUIT / CUIL con validación de dígito verificador
         text = re.sub(
             r"\b(?:20|23|24|27|30|33|34)[-.\s]?\d{8}[-.\s]?\d\b",
             lambda m: tagger.get_tag(m.group(0), "CUIT")
@@ -216,26 +203,20 @@ class HybridSanitizer:
             text,
         )
 
-        # 5. CBU (22 dígitos)
         text = re.sub(r"\b\d{22}\b", lambda m: tagger.get_tag(m.group(0), "CBU"), text)
 
-        # 6. Direcciones IP privadas / internas
         text = re.sub(
             r"\b(?:10\.\d{1,3}|192\.168|172\.(?:1[6-9]|2\d|3[0-1]))\.\d{1,3}\.\d{1,3}\b",
             lambda m: tagger.get_tag(m.group(0), "INTERNAL_IP"),
             text,
         )
 
-        # 7. Montos financieros con símbolo de moneda (ej. $1.250.000).
-        # Se ejecuta antes de DNI para que los separadores de miles no se
-        # confundan con un documento.
         text = re.sub(
             r"(?<!\w)(?:AR\$|US\$|\$)\s?\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})?(?!\w)",
             lambda m: tagger.get_tag(m.group(0), "FINANCIAL"),
             text,
         )
 
-        # 8. DNI: 8 dígitos con puntos o número precedido por la etiqueta DNI.
         def dni_replacer(match: re.Match) -> str:
             numero = match.group(1)
             return match.group(0).replace(numero, tagger.get_tag(numero, "ID"))
@@ -251,14 +232,12 @@ class HybridSanitizer:
             text,
         )
 
-        # 9. Emails
         text = re.sub(
             r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b",
             lambda m: tagger.get_tag(m.group(0), "EMAIL"),
             text,
         )
 
-        # 10. Entidades contextuales con formato reconocible, sin depender del LLM.
         text = re.sub(
             r"\b(?:Proyecto|Programa)\s+[A-ZÁÉÍÓÚÑ][\wáéíóúñ]*(?:\s+[A-ZÁÉÍÓÚÑ][\wáéíóúñ]*)*",
             lambda m: tagger.get_tag(m.group(0), "PROJECT"),
@@ -347,22 +326,17 @@ class HybridSanitizer:
         sanitized = copy.deepcopy(payload)
         tagger = SemanticTagManager()
 
-        # El cliente reenvía TODO el historial en cada request,
-        # incluidas las respuestas previas del asistente, que el proxy ya rehidrató con datos reales.
-        # Por eso se sanitizan los mensajes de todos los roles con un único etiquetador por request,
-        # así el mismo valor recibe siempre la misma etiqueta en todo el historial.
+
         tipos_criticos: Set[str] = set()
         for msg in sanitized.get("messages", []):
             if "content" not in msg:
                 continue
             msg["content"] = self._sanitizar_contenido(msg["content"], tagger)
 
-            # El bloqueo se decide solo por lo que envía el usuario.
             if msg.get("role") == "user":
                 for texto in self._textos_del_contenido(msg["content"]):
                     tipos_criticos.update(self._PATRON_ETIQUETA_CRITICA.findall(texto))
 
-        # Evaluar política de riesgo
         blocked_types: List[str] = sorted(tipos_criticos)
         action = "BLOCK" if blocked_types else "ALLOW"
 

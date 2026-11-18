@@ -26,8 +26,7 @@ import httpx
 
 BACKENDS = ("groq", "ollama", "presidio", "none", "auto")
 
-# Tipos que aporta el Filtro 2. Las categorías deterministas (EMAIL, CUIT,
-# DNI, CBU, etc.) siguen siendo responsabilidad del Filtro 1.
+
 CONTEXT_ENTITY_TYPES = {"PERSON", "ORG", "LOCATION", "PROJECT", "FINANCIAL"}
 
 _TYPE_ALIASES = {
@@ -55,8 +54,7 @@ _TYPE_ALIASES = {
     "AMOUNT": "FINANCIAL",
 }
 
-# Presidio/spaCy no cubren del todo proyectos internos, montos ni direcciones
-# con formato argentino. Se resuelven con regex locales, separadas del motor NER.
+
 _RE_PROYECTO = re.compile(
     r"\b(?:Proyecto|Programa)\s+"
     r"[A-ZÁÉÍÓÚÑ][\wáéíóúñ]*"
@@ -413,15 +411,13 @@ class PresidioAnalyzer(ContextualAnalyzer):
                     inicio <= resultado.start and resultado.end <= fin
                     for inicio, fin in rangos_etiquetas
                 ):
-                    # No re-etiquetar el contenido de [CUIT_1], [EMAIL_1], etc.
                     continue
                 valor = text[resultado.start : resultado.end].strip()
                 if not valor or valor.startswith("["):
                     continue
                 entidades.append({"text": valor, "type": self._reclasificar(valor, tipo)})
 
-            # Proyectos y montos: regex locales, con distinción de mayúsculas
-            # real (Presidio compila los patrones con IGNORECASE).
+
             for coincidencia in _RE_PROYECTO.finditer(text):
                 entidades.append({"text": coincidencia.group(0).strip(), "type": "PROJECT"})
             for coincidencia in _RE_DINERO.finditer(text):

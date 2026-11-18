@@ -1,11 +1,5 @@
 #!/usr/bin/env bash
-# Setup inicial del Proxy DLP.
-# Uso:
-#   ./setup.sh                    -> crea el venv, instala dependencias y prepara el .env
-#   ./setup.sh --demo             -> lo anterior + levanta mock y proxy y corre el cliente de prueba
-#   ./setup.sh --benchmark [...]  -> lo anterior + corre el benchmark en proceso (sin servidores)
-#                                    las opciones extra se pasan a benchmark.py
-#                                    (ej: --color o --no-color)
+
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -23,7 +17,6 @@ if [ "$MODO" = "--benchmark" ] && { [ ! -f benchmark.py ] || [ ! -f benchmark_da
   exit 1
 fi
 
-# Python
 echo "==> Verificando Python..."
 PYTHON_CMD=()
 PYTHON_DESC=""
@@ -62,7 +55,6 @@ EOF
 fi
 echo "    Usando $PYTHON_DESC ($("${PYTHON_CMD[@]}" --version 2>&1))"
 
-# Entorno virtual y dependencias
 echo "==> Preparando el entorno virtual (venv)..."
 if [ ! -d venv ]; then
   "${PYTHON_CMD[@]}" -m venv venv || {
@@ -87,7 +79,6 @@ echo "==> Instalando dependencias..."
 "$VENV_PIP" install --quiet --upgrade pip
 "$VENV_PIP" install --quiet -r requirements.txt
 
-# Variables de entorno
 if [ ! -f .env ] || grep -q "pega_aca" .env; then
   echo "==> Configurando .env..."
   clave=""
@@ -106,7 +97,6 @@ else
   echo "==> .env ya existe, no se modifica."
 fi
 
-# Normalizar CRLF de Windows para que `source .env` funcione en bash.
 if [ -f .env ] && grep -q $'\r' .env 2>/dev/null; then
   tr -d '\r' < .env > .env.tmp
   mv .env.tmp .env
@@ -117,7 +107,6 @@ chmod +x iniciar_proxy.sh
 echo
 echo "Setup listo."
 
-# Instrucciones si no se pidió demo ni benchmark 
 if [ -z "$MODO" ]; then
   cat <<EOF
 
@@ -137,7 +126,7 @@ EOF
   exit 0
 fi
 
-# Servidores (solo para --demo)
+
 LOGS=""
 PID_MOCK=""
 PID_PROXY=""
@@ -178,7 +167,7 @@ levantar_servidores() {
   esperar_puerto 8000 || { echo "ERROR: el proxy no arrancó." >&2; cat "$LOGS/proxy.log" >&2; exit 1; }
 }
 
-# Demo en vivo
+
 if [ "$MODO" = "--demo" ]; then
   levantar_servidores
 
@@ -201,7 +190,6 @@ if [ "$MODO" = "--demo" ]; then
   exit 0
 fi
 
-# Benchmark: corre en proceso, sin servidores.
 shift
 echo "==> Ejecutando el benchmark..."
 "$VENV_PY" benchmark.py "$@"

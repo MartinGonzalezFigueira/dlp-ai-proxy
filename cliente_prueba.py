@@ -56,7 +56,6 @@ resp1 = client.chat.completions.create(model="gpt-4o-mini", messages=historial)
 print("Turno 1 - respuesta que ve el usuario interno (rehidratada):")
 print(resp1.choices[0].message.content)
 
-# El cliente reenvía el historial completo, incluida la respuesta del asistente.
 historial.append({"role": "assistant", "content": resp1.choices[0].message.content})
 historial.append({"role": "user", "content": "¿Me repetís el CUIT que te pasé?"})
 resp2 = client.chat.completions.create(model="gpt-4o-mini", messages=historial)

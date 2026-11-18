@@ -1,17 +1,5 @@
 #!/usr/bin/env bash
-# Prepara una ejecución 100% local/offline del Filtro 2.
-#
-# Uso:
-#   ./setup_local.sh ollama     (default) instala/verifica Ollama y qwen2.5:0.5b
-#   ./setup_local.sh presidio   instala Presidio + spaCy y el modelo español
-#
-# Funciona en Linux/macOS y en Windows con Git Bash/WSL. En Windows detecta
-# `python`/`py` (el alias `python3` de Microsoft Store no ejecuta Python) y usa
-# la carpeta del venv `Scripts/` en lugar de `bin/`.
-#
-# El script actualiza ANALYZER_BACKEND en .env y conserva el resto de variables.
-# La primera instalación necesita Internet; para entornos air-gapped, prepará
-# antes un wheelhouse de Python y el modelo de Ollama/spaCy (ver docs/PLAN_B_LOCAL.md).
+
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -41,15 +29,12 @@ actualizar_env() {
 }
 
 normalizar_env() {
-  # En Windows, .env puede venir con CRLF y romper `source .env` en bash.
   if [ -f .env ] && grep -q $'\r' .env 2>/dev/null; then
     tr -d '\r' < .env > .env.tmp
     mv .env.tmp .env
   fi
 }
 
-# Buscar un Python 3.10+ que realmente ejecute. El alias `python3` de la
-# Microsoft Store existe como comando pero no es un intérprete válido.
 PYTHON_CMD=()
 PYTHON_DESC=""
 
@@ -65,7 +50,7 @@ probar_python() {
 }
 
 buscar_python() {
-  # Presidio/spaCy suelen tener wheels para 3.10-3.12: priorizar esas versiones.
+
   if [ "$MODO" = "presidio" ]; then
     for version in 3.12 3.11 3.10; do
       if command -v "python$version" >/dev/null 2>&1; then
@@ -83,7 +68,7 @@ buscar_python() {
     fi
   done
 
-  # Último intento: el lanzador `py` puede apuntar a Python 2 sin argumentos.
+
   if command -v py >/dev/null 2>&1; then
     probar_python "py -3" py "-3" && return 0
   fi
@@ -102,7 +87,6 @@ EOF
 fi
 echo "    Usando $PYTHON_DESC ($("${PYTHON_CMD[@]}" --version 2>&1))"
 
-# Entorno virtual
 echo "==> Preparando el entorno virtual (venv)..."
 if [ ! -d venv ]; then
   "${PYTHON_CMD[@]}" -m venv venv || {

@@ -44,8 +44,7 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
         self.wfile.write(resp_bytes)
 
     def log_message(self, format, *args):
-        pass  # Silenciar logs HTTP crudos para que se vea limpio el JSON
-
+        pass 
 
 if __name__ == "__main__":
     server = HTTPServer(("127.0.0.1", 9000), MockOpenAIHandler)

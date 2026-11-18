@@ -32,8 +32,7 @@ import audit_logger
 from benchmark_dataset import CONVERSACIONES
 from sanitizer_engine import HybridSanitizer
 
-# La consola de Windows usa cp1252 por defecto y no puede imprimir los
-# caracteres de las tablas/colores. Forzamos UTF-8 cuando sea posible.
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -42,7 +41,6 @@ RUTA_LOG_AUDITORIA = os.path.join(tempfile.gettempdir(), "dlp_benchmark_audit.js
 PLANTILLA_MOCK = "Procesado con éxito por la IA externa. Texto recibido: {texto}"
 CATEGORIAS = ["positivo", "limpio", "borde", "bloqueo"]
 
-# Presentación por terminal
 
 class _Color:
     """Activa/desactiva ANSI. Se respeta NO_COLOR y se puede forzar con --color."""
@@ -332,7 +330,6 @@ def imprimir_informe(lineas):
     volcar()
 
 
-# Preparación
 
 def cargar_env(ruta):
     """Carga las variables del .env sin depender de librerías externas."""
@@ -406,7 +403,6 @@ def proteger_analizador(sanitizador, intervalo, estado):
     sanitizador._apply_llm_ner = envuelto_groq
 
 
-# Simulación de conversaciones
 
 def rehidratar(texto, mapa):
     """Igual que el hook response() del proxy: etiquetas largas primero."""
@@ -499,7 +495,6 @@ def simular(sanitizador, estado):
                     str(m.get("content", "")) for m in salida["sanitized_payload"]["messages"]
                 )
 
-                # 1. Recall en el turno de origen
                 for valor, tipo in turno["sensibles"]:
                     cuenta = res["por_tipo"].setdefault(tipo, [0, 0])
                     cuenta[0] += 1
@@ -512,7 +507,6 @@ def simular(sanitizador, estado):
                         eliminado[(k, valor)] = True
                 errores += len(filtrados)
 
-                # 2. Fugas por historial: datos eliminados antes que reaparecen ahora
                 for j in range(k):
                     for valor, tipo in conv["turnos"][j]["sensibles"]:
                         if eliminado.get((j, valor)):
@@ -539,7 +533,6 @@ def simular(sanitizador, estado):
                     registrar_fallo(res, id_turno, categoria, "BLOQUEO OMITIDO",
                                     "el prompt debía bloquearse y se reenvió", turno["nota"])
 
-                # La IA externa responde repitiendo el texto (como el mock) y el proxy rehidrata
                 ultimo = salida["sanitized_payload"]["messages"][-1]["content"]
                 respuesta = rehidratar(PLANTILLA_MOCK.format(texto=ultimo), salida["tag_to_value"])
                 historial.append({"role": "assistant", "content": respuesta})
@@ -593,7 +586,6 @@ def simular(sanitizador, estado):
             resumen_conv = rojo(f"{len(conv['turnos'])} turnos · {errores_conv} error(es)")
         print(f"  {tenue('+--')} {resumen_conv}")
 
-        # Precisión: de lo que el proxy marcó, qué era realmente sensible
         verdad = [v for t in conv["turnos"] for v, _ in t["sensibles"]]
         neutros = [n for t in conv["turnos"] for n in t["neutros"]]
         for valor, tipo in predichos.items():
@@ -724,7 +716,6 @@ def armar_informe(config, a, auditoria):
     return L
 
 
-# Programa principal
 
 def main():
     parser = argparse.ArgumentParser(description="Benchmark del proxy DLP")
